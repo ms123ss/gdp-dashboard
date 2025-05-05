@@ -1,151 +1,76 @@
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import MetaTrader5 as mt5
+from datetime import datetime
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Function to format AI signals for TradingView (Pine Script)
+def format_pine_script(df):
+    time_str = ",".join(df['formatted_time'])
+    signal_str = ",".join(df['signal'])
+    return time_str, signal_str
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Function to place a trade on Exness via MetaTrader5
+def place_trade(symbol, action, lot_size):
+    # Connect to MetaTrader 5
+    if not mt5.initialize():
+        st.error("MetaTrader 5 initialization failed")
+        return
+    # Create trade request
+    if action == "buy":
+        order_type = mt5.ORDER_TYPE_BUY
+    elif action == "sell":
+        order_type = mt5.ORDER_TYPE_SELL
+    else:
+        st.error("Invalid action")
+        return
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+    price = mt5.symbol_info_tick(symbol).ask
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": lot_size,
+        "type": order_type,
+        "price": price,
+        "sl": price - 10 * mt5.symbol_info(symbol).point,  # Example Stop Loss
+        "tp": price + 10 * mt5.symbol_info(symbol).point,  # Example Take Profit
+        "deviation": 10,
+        "magic": 234000,
+        "comment": "AI-generated trade",
+        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_time": mt5.ORDER_TIME_GTC,
+    }
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+    # Send the trade request
+    result = mt5.order_send(request)
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        st.error(f"Trade failed: {result.comment}")
+    else:
+        st.success(f"Trade executed: {action} at {price}")
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+# Web app UI (Streamlit)
+st.title("AI Signal to TradingView + Exness/MT5")
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+# Upload CSV with AI signals (timestamp and buy/sell)
+uploaded_file = st.file_uploader("Upload AI Signals CSV", type=["csv"])
+if uploaded_file:
+    df = pd.read_csv(uploaded_file)
+    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+    df['formatted_time'] = df['timestamp'].dt.strftime('%Y-%m-%d %H:%M')
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+    # Display AI signals in the DataFrame
+    st.write("AI Signals Data", df)
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    # Format signals for TradingView Pine Script
+    time_str, signal_str = format_pine_script(df)
+    st.write(f"Copy these into Pine Script in TradingView:")
+    st.text(f"Signal Times:\n\"{time_str}\"")
+    st.text(f"Signal Directions:\n\"{signal_str}\"")
 
-    return gdp_df
+    # Optionally place trades in Exness (MT5) based on AI signal
+    symbol = st.selectbox("Select Trading Symbol", ["XAUUSD", "EURUSD", "GBPUSD"])
+    action = st.selectbox("Select Trade Action", ["buy", "sell"])
+    lot_size = st.number_input("Enter Lot Size", min_value=0.01, max_value=100.0, value=0.1)
+    
+    if st.button("Place Trade on Exness/MT5"):
+        place_trade(symbol, action, lot_size)
 
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
